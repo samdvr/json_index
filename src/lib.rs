@@ -35,7 +35,7 @@ impl JsonIndexDB {
     }
 
     /// Index a document with the given document ID
-    pub fn index_document(&self, doc: &str, doc_id: &str) -> Result<()> {
+    pub async fn index_document(&self, doc: &str, doc_id: &str) -> Result<()> {
         let json_val: Value =
             serde_json::from_str(doc).context("Failed to parse document as JSON")?;
 
@@ -64,14 +64,14 @@ impl JsonIndexDB {
 
         // Update the index with flattened key-value pairs
         for key in flattened {
-            self.add_to_index(&key, doc_id)?;
+            self.add_to_index(&key, doc_id).await?;
         }
 
         Ok(())
     }
 
     /// Add a document ID to an index entry
-    fn add_to_index(&self, key: &str, doc_id: &str) -> Result<()> {
+    async fn add_to_index(&self, key: &str, doc_id: &str) -> Result<()> {
         // Check if the key already exists in the index
         let existing = self.index_partition.get(key)?;
 
@@ -100,16 +100,16 @@ impl JsonIndexDB {
     }
 
     /// Query documents that match the given key-value pattern
-    pub fn query(&self, query: &str) -> Result<Vec<(String, String)>> {
+    pub async fn query(&self, query: &str) -> Result<Vec<(String, String)>> {
         // Get document IDs that match the query
-        let doc_ids = self.get_matching_doc_ids(query)?;
+        let doc_ids = self.get_matching_doc_ids(query).await?;
 
         // Retrieve the actual documents
-        self.get_documents(&doc_ids)
+        self.get_documents(&doc_ids).await
     }
 
     /// Complex query with multiple conditions combined with AND/OR logic
-    pub fn complex_query(
+    pub async fn complex_query(
         &self,
         queries: &[&str],
         logic: QueryLogic,
@@ -119,12 +119,12 @@ impl JsonIndexDB {
         }
 
         // Get the first set of results
-        let mut result_doc_ids = self.get_matching_doc_ids(queries[0])?;
+        let mut result_doc_ids = self.get_matching_doc_ids(queries[0]).await?;
         let mut result_set: HashSet<String> = result_doc_ids.into_iter().collect();
 
         // Process subsequent queries based on the logic
         for query in &queries[1..] {
-            let new_doc_ids = self.get_matching_doc_ids(query)?;
+            let new_doc_ids = self.get_matching_doc_ids(query).await?;
             let new_set: HashSet<String> = new_doc_ids.into_iter().collect();
 
             match logic {
@@ -141,11 +141,11 @@ impl JsonIndexDB {
 
         // Convert back to vector and retrieve the documents
         result_doc_ids = result_set.into_iter().collect();
-        self.get_documents(&result_doc_ids)
+        self.get_documents(&result_doc_ids).await
     }
 
     /// Get document IDs that match a specific query
-    fn get_matching_doc_ids(&self, query: &str) -> Result<Vec<String>> {
+    async fn get_matching_doc_ids(&self, query: &str) -> Result<Vec<String>> {
         match self.index_partition.get(query)? {
             Some(ids_bytes) => {
                 let doc_ids: Vec<String> = serde_json::from_slice(&ids_bytes)?;
@@ -156,7 +156,7 @@ impl JsonIndexDB {
     }
 
     /// Retrieve documents by their IDs
-    fn get_documents(&self, doc_ids: &[String]) -> Result<Vec<(String, String)>> {
+    async fn get_documents(&self, doc_ids: &[String]) -> Result<Vec<(String, String)>> {
         let mut results = Vec::with_capacity(doc_ids.len());
 
         for doc_id in doc_ids {
@@ -170,7 +170,7 @@ impl JsonIndexDB {
     }
 
     /// Delete a document and its index entries
-    pub fn delete_document(&self, doc_id: &str) -> Result<()> {
+    pub async fn delete_document(&self, doc_id: &str) -> Result<()> {
         // First get the document
         let doc_bytes = match self.doc_partition.get(doc_id)? {
             Some(bytes) => bytes,
@@ -242,8 +242,8 @@ mod tests {
     use std::fs;
     use std::path::Path;
 
-    #[test]
-    fn test_basic_flow() -> Result<()> {
+    #[tokio::test]
+    async fn test_basic_flow() -> Result<()> {
         // Create a temporary directory for testing
         let test_dir = "test_db_data";
         if Path::new(test_dir).exists() {
@@ -252,7 +252,7 @@ mod tests {
 
         // Create a database instance
         let keyspace = Config::new(test_dir).open()?;
-        let jsonindex = JsonIndexDB::new(keyspace)?;
+        let json_index = JsonIndexDB::new(keyspace)?;
 
         // Test document
         let doc = r#"{
@@ -266,32 +266,38 @@ mod tests {
 
         // Index the document
         let doc_id = "test-doc-123";
-        jsonindex.index_document(doc, doc_id)?;
+        json_index.index_document(doc, doc_id).await?;
 
         // Test simple query
-        let results = jsonindex.query("name=Test User")?;
+        let results = json_index.query("name=Test User").await?;
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].0, doc_id);
 
         // Test complex AND query - both conditions match
-        let results = jsonindex.complex_query(&["name=Test User", "age=25"], QueryLogic::And)?;
+        let results = json_index
+            .complex_query(&["name=Test User", "age=25"], QueryLogic::And)
+            .await?;
         assert_eq!(results.len(), 1);
 
         // Test complex AND query - one condition doesn't match
-        let results = jsonindex.complex_query(&["name=Test User", "age=30"], QueryLogic::And)?;
+        let results = json_index
+            .complex_query(&["name=Test User", "age=30"], QueryLogic::And)
+            .await?;
         assert_eq!(results.len(), 0);
 
         // Test complex OR query
-        let results = jsonindex.complex_query(&["age=25", "age=30"], QueryLogic::Or)?;
+        let results = json_index
+            .complex_query(&["age=25", "age=30"], QueryLogic::Or)
+            .await?;
         assert_eq!(results.len(), 1);
 
         // Test nested field query
-        let results = jsonindex.query("address.city=Test City")?;
+        let results = json_index.query("address.city=Test City").await?;
         assert_eq!(results.len(), 1);
 
         // Test deletion
-        jsonindex.delete_document(doc_id)?;
-        let results = jsonindex.query("name=Test User")?;
+        json_index.delete_document(doc_id).await?;
+        let results = json_index.query("name=Test User").await?;
         assert_eq!(results.len(), 0);
 
         // Clean up test directory
